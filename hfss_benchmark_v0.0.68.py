@@ -3387,7 +3387,7 @@ def get_speedup_base_result_for_result(
 
 
 EXPORT_FORMAT_NAME = "HFSS_BENCHMARK_GUI_RESULT_PYAEDT"
-EXPORT_FORMAT_VERSION = 64
+EXPORT_FORMAT_VERSION = 68
 
 
 def benchmark_case_to_dict(case: BenchmarkCase) -> dict:
@@ -3871,6 +3871,9 @@ class HfssBenchmarkApp:
         self.queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.results: list[OneRunResult] = []
         self.round_results: list[OneRunResult] = []
+        self.round_chart_point_index: list[dict] = []
+        self.round_chart_hover_key: str | None = None
+        self.round_chart_pinned_keys: set[str] = set()
         self.current_host_config: dict[str, str] = {}
         self.imported_datasets: list[dict] = []
         self.dataset_visibility_vars: dict[str, tk.BooleanVar] = {}
@@ -4347,6 +4350,9 @@ class HfssBenchmarkApp:
         self.round_chart_canvas = tk.Canvas(round_chart_tab, height=460, background=UI_BG, highlightthickness=1)
         self.round_chart_canvas.pack(fill=tk.BOTH, expand=True)
         self.round_chart_canvas.bind("<Configure>", lambda event: self._draw_round_chart())
+        self.round_chart_canvas.bind("<Motion>", self._on_round_chart_motion)
+        self.round_chart_canvas.bind("<Leave>", self._on_round_chart_leave)
+        self.round_chart_canvas.bind("<Button-1>", self._on_round_chart_click)
 
         log_frame = ttk.LabelFrame(result_bottom, text="运行日志")
         log_frame.pack(fill=tk.BOTH, expand=True)
@@ -4674,8 +4680,18 @@ class HfssBenchmarkApp:
             current_var = self.dataset_visibility_vars.get("current", tk.BooleanVar(value=True))
             self.dataset_visibility_vars = {"current": current_var}
 
+            self.round_chart_hover_key = None
+            self.round_chart_pinned_keys.clear()
+            self.round_chart_point_index = []
+
             self._refresh_dataset_visibility_panel()
             self._draw_rating_chart()
+            self._draw_round_chart()
+            try:
+                self.round_chart_canvas.update_idletasks()
+            except Exception:
+                pass
+
             self._append_log(f"已删除 {len(selected)} 条导入数据。\\n")
             win.destroy()
 
@@ -4756,6 +4772,10 @@ class HfssBenchmarkApp:
                 else:
                     self._append_log(f"已导入对比结果：{path}，有效记录 {len(results)} 条\n")
 
+            self.round_chart_hover_key = None
+            self.round_chart_pinned_keys.clear()
+            self.round_chart_point_index = []
+
             self._refresh_dataset_visibility_panel()
             self._draw_rating_chart()
             self._draw_round_chart()
@@ -4809,6 +4829,9 @@ class HfssBenchmarkApp:
     def _discard_current_run_results(self) -> None:
         self.results.clear()
         self.round_results.clear()
+        self.round_chart_hover_key = None
+        self.round_chart_pinned_keys.clear()
+        self.round_chart_point_index = []
         for item in self.tree.get_children():
             self.tree.delete(item)
         self._refresh_result_table_speedup()
@@ -5279,7 +5302,7 @@ class HfssBenchmarkApp:
         canvas.create_text(
             left_margin + 20,
             legend_y,
-            text="T1：建模基准 10点",
+            text="单任务",
             anchor="w",
             fill=sub_text,
             font=("Segoe UI", 8),
@@ -5307,7 +5330,7 @@ class HfssBenchmarkApp:
         canvas.create_text(
             x2 + 20,
             y2,
-            text="满载：建模满载线性",
+            text="满载",
             anchor="w",
             fill=sub_text,
             font=("Segoe UI", 8),
@@ -5332,12 +5355,50 @@ class HfssBenchmarkApp:
             width=max(width - x3 - right_margin - 24, 120),
         )
 
+    def _find_nearest_round_chart_point(self, x: float, y: float, max_dist: float = 18.0) -> dict | None:
+        best = None
+        best_d2 = max_dist * max_dist
+        for p in getattr(self, "round_chart_point_index", []):
+            dx = float(p.get("x", 0.0)) - x
+            dy = float(p.get("y", 0.0)) - y
+            d2 = dx * dx + dy * dy
+            if d2 <= best_d2:
+                best = p
+                best_d2 = d2
+        return best
+
+    def _on_round_chart_motion(self, event) -> None:
+        hit = self._find_nearest_round_chart_point(event.x, event.y)
+        new_key = str(hit.get("key")) if hit is not None else None
+        if new_key != self.round_chart_hover_key:
+            self.round_chart_hover_key = new_key
+            self._draw_round_chart()
+
+    def _on_round_chart_leave(self, event) -> None:
+        if self.round_chart_hover_key is not None:
+            self.round_chart_hover_key = None
+            self._draw_round_chart()
+
+    def _on_round_chart_click(self, event) -> None:
+        hit = self._find_nearest_round_chart_point(event.x, event.y, max_dist=22.0)
+        if hit is None:
+            return
+        key = str(hit.get("key"))
+        if key in self.round_chart_pinned_keys:
+            self.round_chart_pinned_keys.remove(key)
+        else:
+            self.round_chart_pinned_keys.add(key)
+        self.round_chart_hover_key = key
+        self._draw_round_chart()
+
     def _draw_round_chart(self) -> None:
         canvas = getattr(self, "round_chart_canvas", None)
         if canvas is None:
             return
 
         canvas.delete("all")
+        self.round_chart_point_index = []
+
         width = canvas.winfo_width()
         height = canvas.winfo_height()
         canvas.configure(background=UI_BG)
@@ -5370,6 +5431,8 @@ class HfssBenchmarkApp:
             "#65a30d",
             "#b45309",
             "#0f766e",
+            "#be185d",
+            "#4d7c0f",
         ]
 
         datasets = self._get_chart_datasets()
@@ -5397,6 +5460,7 @@ class HfssBenchmarkApp:
                     continue
                 grouped.setdefault(int(r.tasks), []).append((int(getattr(r, "round_index", 0) or 0), score))
 
+            dataset_id = str(dataset.get("dataset_id") or f"ds{dataset_index}")
             for tasks, pts in sorted(grouped.items(), key=lambda item: (item[0] != 1, item[0])):
                 pts = sorted(pts, key=lambda item: item[0])
                 if not pts:
@@ -5406,7 +5470,9 @@ class HfssBenchmarkApp:
                 line_items.append(
                     {
                         "dataset_index": dataset_index,
+                        "dataset_id": dataset_id,
                         "tasks": tasks,
+                        "task_label": task_label,
                         "label": label,
                         "points": pts,
                     }
@@ -5436,50 +5502,54 @@ class HfssBenchmarkApp:
         left_margin = 74 if width >= 520 else 58
         right_margin = 18 if width >= 520 else 10
 
+        # 图例自动换行排版，曲线较多时不再只显示前几条。
         legend_top = 38
         legend_left = left_margin
         legend_right = right_margin
         legend_w = max(width - legend_left - legend_right, 120)
         legend_font = ("Segoe UI", 8 if width >= 520 else 7)
-        legend_cols = 2 if width >= 900 and len(line_items) > 1 else 1
+        if width >= 1220 and len(line_items) >= 3:
+            legend_cols = 3
+        elif width >= 820 and len(line_items) >= 2:
+            legend_cols = 2
+        else:
+            legend_cols = 1
         col_w = legend_w / legend_cols
-        line_h = 18
-        visible_legend_count = min(len(line_items), max(1, legend_cols * 5))
-        legend_rows = (visible_legend_count + legend_cols - 1) // legend_cols
-        legend_h = legend_rows * line_h + 8
 
-        for i, item in enumerate(line_items[:visible_legend_count]):
-            col = i % legend_cols
-            row = i // legend_cols
-            x = legend_left + col * col_w
-            y = legend_top + row * line_h
-            color = palette[i % len(palette)]
-            canvas.create_line(x, y + 7, x + 16, y + 7, fill=color, width=2)
-            canvas.create_oval(x + 6, y + 3, x + 10, y + 11, fill=color, outline=color)
-            canvas.create_text(
-                x + 22,
-                y,
-                text=item["label"],
-                anchor="nw",
-                fill=sub_text,
-                font=legend_font,
-                width=max(90, int(col_w - 28)),
-            )
+        def estimate_legend_lines(label: str, text_w: int) -> int:
+            avg_px = 6.0 if width >= 520 else 5.3
+            return max(1, int((len(label) * avg_px) // max(text_w, 70)) + 1)
 
-        if len(line_items) > visible_legend_count:
-            canvas.create_text(
-                legend_left,
-                legend_top + legend_rows * line_h,
-                text=f"还有 {len(line_items) - visible_legend_count} 条曲线未列入图例，但仍绘制在图中。",
-                anchor="nw",
-                fill=sub_text,
-                font=legend_font,
-                width=max(width - left_margin - right_margin, 120),
-            )
-            legend_h += 20
+        legend_row_heights: list[int] = []
+        for row_start in range(0, len(line_items), legend_cols):
+            labels = [str(item["label"]) for item in line_items[row_start: row_start + legend_cols]]
+            text_w = max(90, int(col_w - 30))
+            max_lines = max(estimate_legend_lines(label, text_w) for label in labels)
+            legend_row_heights.append(max(18, 12 * max_lines + 6))
 
-        top_margin = max(82, legend_top + legend_h + 12)
-        bottom_margin = 50
+        y = legend_top
+        for row_index, row_start in enumerate(range(0, len(line_items), legend_cols)):
+            row_items = line_items[row_start: row_start + legend_cols]
+            row_h = legend_row_heights[row_index]
+            for col_index, item in enumerate(row_items):
+                i = row_start + col_index
+                x = legend_left + col_index * col_w
+                color = palette[i % len(palette)]
+                canvas.create_line(x, y + 7, x + 16, y + 7, fill=color, width=2)
+                canvas.create_oval(x + 6, y + 3, x + 10, y + 11, fill=color, outline=color)
+                canvas.create_text(
+                    x + 22,
+                    y,
+                    text=str(item["label"]),
+                    anchor="nw",
+                    fill=sub_text,
+                    font=legend_font,
+                    width=max(90, int(col_w - 30)),
+                )
+            y += row_h
+
+        top_margin = max(82, y + 10)
+        bottom_margin = 52
         plot_w = width - left_margin - right_margin
         plot_h = height - top_margin - bottom_margin
 
@@ -5487,7 +5557,7 @@ class HfssBenchmarkApp:
             canvas.create_text(
                 width // 2,
                 height // 2,
-                text="当前窗口给折线图留下的空间太小，请放大窗口或拖动分隔栏。",
+                text="当前窗口给折线图留下的空间太小，请放大窗口、隐藏部分导入数据，或拖动分隔栏。",
                 anchor="center",
                 fill=sub_text,
                 font=("Segoe UI", 9),
@@ -5502,7 +5572,7 @@ class HfssBenchmarkApp:
             max_round = min_round + 1
 
         max_score = max(score for _round_idx, score in all_points)
-        chart_max = max(max_score * 1.08, 1.0)
+        chart_max = max(max_score * 1.10, 1.0)
 
         x0 = left_margin
         y1 = top_margin
@@ -5512,6 +5582,7 @@ class HfssBenchmarkApp:
         canvas.create_rectangle(x0, y1, x1, y0, fill=panel, outline="#cfd8e3")
 
         tick_count = 4
+        axis_font = ("Segoe UI", 8 if width >= 520 else 7)
         for i in range(tick_count + 1):
             value = chart_max * i / tick_count
             yy = y0 - plot_h * i / tick_count
@@ -5522,7 +5593,7 @@ class HfssBenchmarkApp:
                 text=f"{value:.0f}",
                 anchor="e",
                 fill=sub_text,
-                font=("Segoe UI", 8 if width >= 520 else 7),
+                font=axis_font,
             )
             if i > 0:
                 canvas.create_line(x0, yy, x1, yy, fill=grid, dash=(3, 4))
@@ -5548,7 +5619,7 @@ class HfssBenchmarkApp:
                 text=str(int(r_idx)),
                 anchor="n",
                 fill=sub_text,
-                font=("Segoe UI", 8 if width >= 520 else 7),
+                font=axis_font,
             )
             if r_idx != min_round:
                 canvas.create_line(xx, y1, xx, y0, fill=grid, dash=(2, 6))
@@ -5564,28 +5635,170 @@ class HfssBenchmarkApp:
             font=("Segoe UI", 8),
         )
 
+        # 标签绘制工具：只画文字，不加边框、不加白底；仍尽量避开点、线和其他标签。
+        label_bboxes: list[tuple[float, float, float, float]] = []
+        point_meta: dict[str, dict] = {}
+
+        def bbox_overlap(a, b, pad: float = 2.0) -> bool:
+            return not (a[2] + pad < b[0] or a[0] - pad > b[2] or a[3] + pad < b[1] or a[1] - pad > b[3])
+
+        def clamp(v: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, v))
+
+        def draw_value_label(
+            cx: float,
+            cy: float,
+            text: str,
+            color: str,
+            prefer: str = "auto",
+            font_size: int = 9,
+            leader: bool = False,
+        ) -> None:
+            font = ("Segoe UI", font_size, "bold")
+            # 粗略估算文字尺寸，用于避让；没有白底框，所以留出更大的安全间距。
+            tw = max(38, len(text) * (font_size * 0.64) + 8)
+            th = font_size + 8
+
+            # 候选位置：优先离点远一点，避免直接盖住线和点。
+            gap_x = 14
+            gap_y = 18
+            candidates = []
+            if prefer == "up":
+                candidates = [(gap_x, -gap_y - th), (-tw - gap_x, -gap_y - th), (gap_x, gap_y), (-tw - gap_x, gap_y)]
+            elif prefer == "down":
+                candidates = [(gap_x, gap_y), (-tw - gap_x, gap_y), (gap_x, -gap_y - th), (-tw - gap_x, -gap_y - th)]
+            elif prefer == "left":
+                candidates = [(-tw - gap_x, -th / 2), (-tw - gap_x, -gap_y - th), (-tw - gap_x, gap_y), (gap_x, -th / 2)]
+            elif prefer == "right":
+                candidates = [(gap_x, -th / 2), (gap_x, -gap_y - th), (gap_x, gap_y), (-tw - gap_x, -th / 2)]
+            else:
+                if cy < y1 + plot_h * 0.32:
+                    candidates = [(gap_x, gap_y), (-tw - gap_x, gap_y), (gap_x, -gap_y - th), (-tw - gap_x, -gap_y - th)]
+                else:
+                    candidates = [(gap_x, -gap_y - th), (-tw - gap_x, -gap_y - th), (gap_x, gap_y), (-tw - gap_x, gap_y)]
+
+            chosen = None
+            for dx, dy in candidates:
+                lx = clamp(cx + dx, x0 + 4, x1 - tw - 4)
+                ly = clamp(cy + dy, y1 + 4, y0 - th - 4)
+                bb = (lx, ly, lx + tw, ly + th)
+                if not any(bbox_overlap(bb, old) for old in label_bboxes):
+                    chosen = (lx, ly, bb)
+                    break
+
+            if chosen is None:
+                dx, dy = candidates[0]
+                lx = clamp(cx + dx, x0 + 4, x1 - tw - 4)
+                ly = clamp(cy + dy, y1 + 4, y0 - th - 4)
+                # 如果仍然重叠，就逐步下移寻找位置。
+                bb = (lx, ly, lx + tw, ly + th)
+                for step in range(1, 8):
+                    test_ly = clamp(ly + step * (th + 3), y1 + 4, y0 - th - 4)
+                    test_bb = (lx, test_ly, lx + tw, test_ly + th)
+                    if not any(bbox_overlap(test_bb, old) for old in label_bboxes):
+                        ly, bb = test_ly, test_bb
+                        break
+                chosen = (lx, ly, bb)
+
+            lx, ly, bb = chosen
+            label_bboxes.append(bb)
+
+            if leader:
+                # 极值标签保留一根很轻的指示线，避免读数与对应点脱节。
+                target_x = lx if lx > cx else lx + tw
+                target_y = ly + th / 2
+                canvas.create_line(cx, cy, target_x, target_y, fill=color, width=1, dash=(2, 3))
+
+            txt = canvas.create_text(
+                lx + tw / 2,
+                ly + th / 2,
+                text=text,
+                fill=color,
+                font=font,
+                anchor="center",
+            )
+            canvas.tag_raise(txt)
+
+        # 先画线，再画普通点。
         for i, item in enumerate(line_items):
             color = palette[i % len(palette)]
-            pts_xy = [(x_for_round(round_idx), y_for_score(score)) for round_idx, score in item["points"]]
+            pts_xy = [(x_for_round(round_idx), y_for_score(score), round_idx, score) for round_idx, score in item["points"]]
+
             if len(pts_xy) >= 2:
                 flat = []
-                for x, y in pts_xy:
+                for x, y, _round_idx, _score in pts_xy:
                     flat.extend([x, y])
                 canvas.create_line(*flat, fill=color, width=2, smooth=False)
-            for x, y in pts_xy:
+
+            for x, y, round_idx, score in pts_xy:
+                key = f"{item['dataset_id']}|{item['tasks']}|{round_idx}"
+                meta = {
+                    "key": key,
+                    "x": x,
+                    "y": y,
+                    "round_index": round_idx,
+                    "score": score,
+                    "color": color,
+                    "label": item["label"],
+                    "task_label": item["task_label"],
+                    "tasks": item["tasks"],
+                }
+                self.round_chart_point_index.append(meta)
+                point_meta[key] = meta
                 canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color, outline=UI_BG)
 
-            if len(line_items) <= 6 and pts_xy:
-                last_x, last_y = pts_xy[-1]
-                last_score = item["points"][-1][1]
-                canvas.create_text(
-                    min(last_x + 6, x1 - 4),
-                    last_y,
-                    text=f"{last_score:.0f}",
-                    anchor="w" if last_x < x1 - 30 else "e",
-                    fill=color,
-                    font=("Segoe UI", 7),
-                )
+        # 最大/最小值标签：不受鼠标点击控制，始终显示。
+        extrema_keys: set[str] = set()
+        for i, item in enumerate(line_items):
+            color = palette[i % len(palette)]
+            pts = item["points"]
+            if not pts:
+                continue
+            max_pt = max(pts, key=lambda v: v[1])
+            min_pt = min(pts, key=lambda v: v[1])
+            extrema = []
+            if max_pt == min_pt:
+                extrema.append(("最大=最小", max_pt))
+            else:
+                extrema.append(("最大", max_pt))
+                extrema.append(("最小", min_pt))
+
+            for tag, (round_idx, score) in extrema:
+                key = f"{item['dataset_id']}|{item['tasks']}|{round_idx}"
+                extrema_keys.add(key)
+                x = x_for_round(round_idx)
+                y = y_for_score(score)
+                prefer = "down" if tag.startswith("最大") and y < y1 + plot_h * 0.28 else "up"
+                if tag.startswith("最小") and y > y1 + plot_h * 0.72:
+                    prefer = "up"
+                elif tag.startswith("最小"):
+                    prefer = "down"
+                draw_value_label(x, y, f"{tag} {score:.0f}", color, prefer=prefer, font_size=9, leader=True)
+
+        # 鼠标悬停和点击固定的点，后画，保证放大效果可见。
+        highlight_keys = set(self.round_chart_pinned_keys)
+        if self.round_chart_hover_key:
+            highlight_keys.add(self.round_chart_hover_key)
+
+        for key in list(highlight_keys):
+            meta = point_meta.get(key)
+            if meta is None:
+                continue
+
+            x = float(meta["x"])
+            y = float(meta["y"])
+            color = str(meta["color"])
+            is_hover = key == self.round_chart_hover_key
+            radius = 8 if is_hover else 6
+
+            canvas.create_oval(x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2, fill="", outline=color, width=2)
+            canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=color, outline=color, width=1)
+
+            # 极值点已经有极值标签；悬停时只放大点，非极值或点击固定点显示轮次+分数。
+            if key not in extrema_keys or key in self.round_chart_pinned_keys:
+                label_text = f"第{int(meta['round_index'])}轮 {float(meta['score']):.0f}"
+                prefer = "down" if y < y1 + plot_h * 0.35 else "up"
+                draw_value_label(x, y, label_text, color, prefer=prefer, font_size=10)
 
     def _refresh_result_table_speedup(self) -> None:
         items = self.tree.get_children()
