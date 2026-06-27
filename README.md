@@ -15,7 +15,7 @@
 ## 这个程序能做什么？
 
 - 自动打开 HFSS / AEDT
-- 自动建立一个固定的 7 阶 interdigital 滤波器模型（这里使用了Filter Solution导出的尺寸txt文件，直接让AI建模还是太困难了）
+- 自动建立一个固定的 7 阶 interdigital 滤波器模型（这里使用了Filter Solution导出的尺寸txt文件辅助，直接让AI建模还是太困难了）
 - 自动设置仿真 Setup 和 Sweep
 - 自动运行跑分
 - 显示频点吞吐量柱状图
